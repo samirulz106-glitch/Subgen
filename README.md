@@ -1,2 +1,4 @@
-# Subgen
-Offline Windows subtitle generator. Drop in a video, get an .srt next to it. Uses whisper.cpp and ffmpeg, installs with one Setup.exe.
+# SubGen
+
+Windows app that generates .srt subtitles for a video, offline, using whisper.cpp.
+The installer is built by GitHub Actions (see .github/workflows/build.yml).
