@@ -9,6 +9,7 @@
     <AssemblyName>SubGen</AssemblyName>
     <RootNamespace>SubGen</RootNamespace>
     <Version>1.0.0</Version>
+    <ApplicationIcon>subgen.ico</ApplicationIcon>
   </PropertyGroup>
 
 </Project>
