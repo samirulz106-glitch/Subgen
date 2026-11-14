@@ -4,6 +4,7 @@
 #define MyAppVersion "1.0.0"
 
 [Setup]
+SetupIconFile=..\Subgen\subgen.ico
 AppId={{B6E2A2B4-7C1D-4C57-9B8E-5A1F0C3D9E21}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
