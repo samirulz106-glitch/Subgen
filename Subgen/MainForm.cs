@@ -5,7 +5,7 @@ namespace SubGen;
 
 public class MainForm : Form
 {
-    sealed record ModelChoice(string Label, string File)
+    sealed record ModelChoice(string Label, string File, bool Foreign)
     {
         public override string ToString() => Label;
     }
@@ -30,6 +30,7 @@ public class MainForm : Form
         this.initialFile = initialFile;
 
         Text = "SubGen - subtitle generator";
+        try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
         AutoScaleDimensions = new SizeF(96F, 96F);
         AutoScaleMode = AutoScaleMode.Dpi;
         ClientSize = new Size(560, 230);
@@ -47,8 +48,9 @@ public class MainForm : Form
         startBtn.SetBounds(12, 190, 200, 30);
         cancelBtn.SetBounds(220, 190, 100, 30);
 
-        modelBox.Items.Add(new ModelChoice("Accurate (base.en) - slower", "ggml-base.en.bin"));
-        modelBox.Items.Add(new ModelChoice("Fast (tiny.en) - quicker, less accurate", "ggml-tiny.en.bin"));
+        modelBox.Items.Add(new ModelChoice("Accurate (base.en) - the tested one", "ggml-base.en.bin", false));
+        modelBox.Items.Add(new ModelChoice("Fast (tiny.en) - quicker, less accurate", "ggml-tiny.en.bin", false));
+        modelBox.Items.Add(new ModelChoice("Foreign speech to English (multilingual) - slower", "ggml-small-q5_1.bin", true));
         modelBox.SelectedIndex = 0;
 
         Controls.AddRange(new Control[] { pathBox, browseBtn, modelBox, benchBox, bar, status, startBtn, cancelBtn });
@@ -109,7 +111,8 @@ public class MainForm : Form
         var baseDir = AppContext.BaseDirectory;
         var ffmpeg = Path.Combine(baseDir, "engine", "ffmpeg.exe");
         var whisper = Path.Combine(baseDir, "engine", "whisper-cli.exe");
-        var model = Path.Combine(baseDir, "models", ((ModelChoice)modelBox.SelectedItem!).File);
+        var choice = (ModelChoice)modelBox.SelectedItem!;
+        var model = Path.Combine(baseDir, "models", choice.File);
         foreach (var f in new[] { ffmpeg, whisper, model })
         {
             if (!File.Exists(f))
@@ -123,7 +126,7 @@ public class MainForm : Form
         var finalSrt = Path.ChangeExtension(video, ".srt");
 
         if (!bench && File.Exists(finalSrt) &&
-            MessageBox.Show(this, "A subtitle file already exists:\n" + finalSrt + "\n\nReplace it?",
+            MessageBox.Show(this, "A subtitle file already exists:\n" + finalSrt + "\n\nReplace it? (The old one is kept as a .bak copy.)",
                 "SubGen", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
             return;
 
@@ -150,16 +153,16 @@ public class MainForm : Form
         {
             // Step 1: pull the audio out of the video.
             SetMarquee("Extracting audio...");
-            var ffArgs = new List<string> { "-y", "-hide_banner", "-loglevel", "error", "-i", video };
+            var ffArgs = new List<string> { "-nostdin", "-y", "-v", "error", "-i", video };
             if (bench) { ffArgs.Add("-t"); ffArgs.Add("300"); }
-            ffArgs.AddRange(new[] { "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", wav });
+            ffArgs.AddRange(new[] { "-map", "0:a:0", "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", wav });
 
             int code = await RunProc(ffmpeg, ffArgs, Remember);
             if (cancelled) { SetStatus("Cancelled."); return; }
-            if (code != 0 || !File.Exists(wav))
+            if (code != 0 || !File.Exists(wav) || new FileInfo(wav).Length < 1000)
             {
                 SetStatus("Failed.");
-                Info("Could not read audio from this file.\n\n" + TailText());
+                Info("Could not read audio from this file (no audio track?).\n\n" + TailText());
                 return;
             }
 
@@ -168,13 +171,10 @@ public class MainForm : Form
             lock (tail) tail.Clear();
             SetProgress(0);
 
-            var wArgs = new List<string>
-            {
-                "-m", model, "-f", wav,
-                "-t", Math.Clamp(Environment.ProcessorCount, 1, 8).ToString(),
-                "-pp"
-            };
+            var wArgs = new List<string> { "-m", model, "-f", wav, "-l", choice.Foreign ? "auto" : "en" };
+            if (choice.Foreign) wArgs.Add("-tr"); // translate foreign speech into English
             if (!bench) { wArgs.Add("-osrt"); wArgs.Add("-of"); wArgs.Add(outBase); }
+            wArgs.AddRange(new[] { "-t", Math.Clamp(Environment.ProcessorCount, 1, 4).ToString(), "-pp" });
 
             var sw = Stopwatch.StartNew();
             code = await RunProc(whisper, wArgs, line =>
@@ -213,7 +213,33 @@ public class MainForm : Form
                 return;
             }
 
-            File.Move(producedSrt, finalSrt, true);
+            var text = File.ReadAllText(producedSrt);
+            if (!text.Contains(" --> "))
+            {
+                SetStatus("Failed.");
+                Info("The subtitle file came out empty. Does this video have any speech?");
+                return;
+            }
+            if (!text.EndsWith("\n")) text += "\n";
+
+            // Write to a temp file in the video's folder first, then swap it in.
+            var tmpSrt = Path.Combine(Path.GetDirectoryName(video)!, ".subgen-" + id + ".tmp");
+            try
+            {
+                File.WriteAllText(tmpSrt, text, new System.Text.UTF8Encoding(false));
+                if (File.Exists(finalSrt))
+                {
+                    var bak = finalSrt + ".bak";
+                    for (int n = 2; File.Exists(bak); n++) bak = finalSrt + ".bak" + n;
+                    File.Copy(finalSrt, bak);
+                }
+                File.Move(tmpSrt, finalSrt, true);
+            }
+            finally
+            {
+                try { if (File.Exists(tmpSrt)) File.Delete(tmpSrt); } catch { }
+            }
+
             SetProgress(100);
             SetStatus($"Done in {total.Elapsed:hh\\:mm\\:ss}. Saved: {finalSrt}");
             Info("Subtitles saved next to the video:\n" + finalSrt);
@@ -243,6 +269,7 @@ public class MainForm : Form
             CreateNoWindow = true,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
+            RedirectStandardInput = true,
             StandardOutputEncoding = System.Text.Encoding.UTF8,
             StandardErrorEncoding = System.Text.Encoding.UTF8,
             WorkingDirectory = Path.GetDirectoryName(exe)!
@@ -260,6 +287,7 @@ public class MainForm : Form
 
         current = p;
         p.Start();
+        p.StandardInput.Close();
         p.BeginOutputReadLine();
         p.BeginErrorReadLine();
         return tcs.Task;
