@@ -1,7 +1,7 @@
 ; Inno Setup script for SubGen. Built automatically by GitHub Actions.
 
 #define MyAppName "SubGen"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.1.8"
 
 [Setup]
 SetupIconFile=..\Subgen\subgen.ico
