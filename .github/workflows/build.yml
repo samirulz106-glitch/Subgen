@@ -15,13 +15,27 @@ jobs:
         with:
           dotnet-version: 8.0.x
 
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj') }}
+
       - name: Build the SubGen app
         shell: pwsh
         run: |
           $proj = Get-ChildItem -Recurse -Filter *.csproj | Select-Object -First 1
           dotnet publish $proj.FullName -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:DebugType=None -o stage
 
+      - name: Cache the whisper engine
+        id: whisper-cache
+        uses: actions/cache@v4
+        with:
+          path: whisper-engine
+          key: whisper-engine-v1.9.5-r1
+
       - name: Build whisper.cpp (the speech engine)
+        if: steps.whisper-cache.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
           git clone --depth 1 --branch v1.9.5 https://github.com/ggml-org/whisper.cpp whisper-src
@@ -35,21 +49,40 @@ jobs:
           cmake --build whisper-build --config Release --target whisper-cli -j 4
           $cli = Get-ChildItem whisper-build -Recurse -Filter whisper-cli.exe | Select-Object -First 1
           if (-not $cli) { throw "whisper-cli.exe was not built" }
+          New-Item -ItemType Directory -Force whisper-engine | Out-Null
+          Copy-Item "$($cli.DirectoryName)\*" whisper-engine -Recurse -Exclude *.lib,*.pdb,*.exp
+
+      - name: Add the engine to the installer folder
+        shell: pwsh
+        run: |
           New-Item -ItemType Directory -Force stage/engine | Out-Null
-          Copy-Item "$($cli.DirectoryName)\*" stage/engine -Recurse -Exclude *.lib,*.pdb,*.exp
+          Copy-Item whisper-engine\* stage/engine -Recurse
+
+      - name: Cache ffmpeg and models
+        uses: actions/cache@v4
+        with:
+          path: dl
+          key: downloads-r1
 
       - name: Get ffmpeg and the speech models
         shell: pwsh
         run: |
           $ProgressPreference = 'SilentlyContinue'
-          Invoke-WebRequest "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-lgpl.zip" -OutFile ffmpeg.zip
-          Expand-Archive ffmpeg.zip -DestinationPath ffmpeg_tmp
+          New-Item -ItemType Directory -Force dl | Out-Null
+          if (-not (Test-Path dl/ffmpeg.zip)) {
+            Invoke-WebRequest "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-lgpl.zip" -OutFile dl/ffmpeg.zip
+          }
+          Expand-Archive dl/ffmpeg.zip -DestinationPath ffmpeg_tmp
           $ff = Get-ChildItem ffmpeg_tmp -Recurse -Filter ffmpeg.exe | Select-Object -First 1
           if (-not $ff) { throw "ffmpeg.exe not found" }
           Copy-Item $ff.FullName stage/engine/ffmpeg.exe
           New-Item -ItemType Directory -Force stage/models | Out-Null
-          foreach ($m in "base.en", "tiny.en") {
-            Invoke-WebRequest "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-$m.bin" -OutFile "stage/models/ggml-$m.bin"
+          foreach ($m in "base.en", "tiny.en", "small-q5_1") {
+            $f = "dl/ggml-$m.bin"
+            if (-not (Test-Path $f)) {
+              Invoke-WebRequest "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-$m.bin" -OutFile $f
+            }
+            Copy-Item $f "stage/models/ggml-$m.bin"
           }
 
       - name: Build the installer
